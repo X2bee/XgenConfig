@@ -6,14 +6,69 @@ Redis에서 설정을 dictionary 형태로 쉽게 가져오는 함수들
 import logging
 from typing import Dict, Any, Optional, List
 from service.redis_config_manager import RedisConfigManager
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
+
+def dict_to_namespace(data):
+    """
+    dict를 재귀적으로 SimpleNamespace로 변환
+    자동으로 'vast', 'config' 같은 단일 래퍼 키를 언래핑합니다
+    
+    Args:
+        data: 변환할 데이터 (dict, list, 또는 기본 타입)
+    
+    Returns:
+        SimpleNamespace 또는 변환된 데이터
+    
+    Examples:
+        >>> # 일반 dict
+        >>> data = {'port': 8080, 'host': 'localhost'}
+        >>> obj = dict_to_namespace(data)
+        >>> obj.port
+        8080
+        
+        >>> # 래퍼가 있는 경우 (자동 언래핑)
+        >>> wrapped = {'vast': {'vllm': {'port': 12434}}}
+        >>> obj = dict_to_namespace(wrapped)
+        >>> obj.vllm.port  # 'vast'가 자동으로 제거됨
+        12434
+        
+        >>> # 중첩 구조
+        >>> nested = {'server': {'db': {'host': 'localhost'}}}
+        >>> obj = dict_to_namespace(nested)
+        >>> obj.server.db.host
+        'localhost'
+    """
+    if isinstance(data, dict):
+        # 🎯 자동 언래핑: 단일 키만 있고 그 값이 dict인 경우
+        if len(data) == 1:
+            key, value = next(iter(data.items()))
+            # 일반적인 래퍼 키를 자동으로 건너뜀
+            common_wrappers = {'vast', 'config', 'data', 'settings', 'options', 
+                              'result', 'response', 'payload'}
+            if key in common_wrappers and isinstance(value, dict):
+                data = value  # 래퍼를 벗김
+                logger.debug(f"자동 언래핑: '{key}' 키 제거됨")
+        
+        # dict의 모든 값을 재귀적으로 변환
+        return SimpleNamespace(**{
+            key: dict_to_namespace(value) 
+            for key, value in data.items()
+        })
+    elif isinstance(data, list):
+        # list의 각 요소를 재귀적으로 변환
+        return [dict_to_namespace(item) for item in data]
+    else:
+        # 기본 타입은 그대로 반환
+        return data
 
 
 def get_config_dict(
     redis_manager: Optional[RedisConfigManager] = None,
     category: Optional[str] = None,
-    flatten: bool = False
+    flatten: bool = False,
+    as_namespace: bool = False
 ) -> Dict[str, Any]:
     """
     Redis에서 설정을 dictionary 형태로 가져옵니다.
@@ -23,14 +78,19 @@ def get_config_dict(
         category: 특정 카테고리만 가져오기 (None이면 전체)
         flatten: True면 평탄화된 구조 {"app.environment": "dev"},
                 False면 중첩 구조 {"app": {"environment": "dev"}}
+        as_namespace: True면 SimpleNamespace로 변환 (속성 접근 가능)
 
     Returns:
-        Dict: 설정 딕셔너리
+        Dict 또는 SimpleNamespace: 설정
 
     Examples:
         >>> # 모든 설정을 중첩 구조로
         >>> configs = get_config_dict()
         >>> print(configs["app"]["environment"])  # "development"
+
+        >>> # SimpleNamespace로 변환 (속성 접근)
+        >>> configs = get_config_dict(as_namespace=True)
+        >>> print(configs.app.environment)  # "development"
 
         >>> # 특정 카테고리만 중첩 구조로
         >>> openai_config = get_config_dict(category="openai")
@@ -49,17 +109,17 @@ def get_config_dict(
             if flatten:
                 # 평탄화된 구조
                 configs = redis_manager.get_category_configs(category)
-                return {config['path']: config['value'] for config in configs}
+                result = {config['path']: config['value'] for config in configs}
             else:
                 # 중첩 구조
-                return redis_manager.get_category_configs_nested(category)
+                result = redis_manager.get_category_configs_nested(category)
         else:
             # 모든 설정 가져오기
             all_configs = redis_manager.get_all_configs()
 
             if flatten:
                 # 평탄화된 구조
-                return {config['path']: config['value'] for config in all_configs}
+                result = {config['path']: config['value'] for config in all_configs}
             else:
                 # 중첩 구조
                 result = {}
@@ -78,39 +138,67 @@ def get_config_dict(
 
                     current[keys[-1]] = value
 
-                return result
+        # SimpleNamespace로 변환 (자동 언래핑 포함)
+        if as_namespace:
+            return dict_to_namespace(result)
+        
+        return result
 
     except Exception as e:
         logger.error(f"설정 가져오기 실패: {str(e)}")
-        return {}
+        return {} if not as_namespace else SimpleNamespace()
 
 
 def get_category_config(
     category: str,
-    redis_manager: Optional[RedisConfigManager] = None
-) -> Dict[str, Any]:
+    redis_manager: Optional[RedisConfigManager] = None,
+    as_namespace: bool = True
+) -> Any:
     """
-    특정 카테고리의 설정을 중첩 dictionary로 가져옵니다.
+    특정 카테고리의 설정을 가져옵니다.
+    
+    기본적으로 SimpleNamespace로 반환하여 속성으로 접근 가능합니다.
+    자동으로 카테고리 래퍼 키를 언래핑합니다.
 
     Args:
         category: 카테고리 이름 (예: "openai", "app", "vast")
         redis_manager: RedisConfigManager 인스턴스 (없으면 자동 생성)
+        as_namespace: True면 SimpleNamespace, False면 dict
 
     Returns:
-        Dict: 중첩된 설정 딕셔너리
+        SimpleNamespace 또는 Dict: 설정 객체
 
-    Example:
+    Examples:
+        >>> # SimpleNamespace로 (기본값, 속성 접근)
         >>> openai = get_category_config("openai")
-        >>> print(openai)
-        {
-            "openai": {
-                "api_key": "sk-...",
-                "model_default": "gpt-4o",
-                "temperature_default": 0.7
-            }
-        }
+        >>> print(openai.api_key)  # 바로 접근!
+        >>> print(openai.model_default)
+        
+        >>> # dict로 (as_namespace=False)
+        >>> openai = get_category_config("openai", as_namespace=False)
+        >>> print(openai["openai"]["api_key"])  # 키 접근
+        
+        >>> # vast 설정 (자동 언래핑)
+        >>> vast = get_category_config("vast")
+        >>> print(vast.vllm.gpu_memory_utilization)  # 바로 접근!
     """
-    return get_config_dict(redis_manager=redis_manager, category=category, flatten=False)
+    result = get_config_dict(
+        redis_manager=redis_manager, 
+        category=category, 
+        flatten=False,
+        as_namespace=False  # 일단 dict로 받음
+    )
+    
+    # 카테고리 키로 래핑되어 있으면 언래핑
+    if isinstance(result, dict) and category in result:
+        result = result[category]
+        logger.debug(f"카테고리 '{category}' 자동 언래핑")
+    
+    # SimpleNamespace로 변환 (필요시)
+    if as_namespace:
+        return dict_to_namespace(result)
+    
+    return result
 
 
 def get_flat_config(
@@ -282,27 +370,82 @@ def update_config(
     )
 
 
-# 편의 함수들
-def get_app_config(redis_manager: Optional[RedisConfigManager] = None) -> Dict[str, Any]:
-    """app 카테고리 설정 가져오기"""
-    return get_category_config("app", redis_manager)
+# ============================================
+# 편의 함수들 (자동으로 SimpleNamespace 반환)
+# ============================================
+
+def get_app_config(redis_manager: Optional[RedisConfigManager] = None) -> SimpleNamespace:
+    """
+    app 카테고리 설정 가져오기 (SimpleNamespace)
+    
+    Returns:
+        SimpleNamespace: app.* 설정들을 속성으로 접근 가능
+    
+    Example:
+        >>> app = get_app_config()
+        >>> print(app.environment)
+        >>> print(app.port)
+    """
+    return get_category_config("app", redis_manager, as_namespace=True)
 
 
-def get_openai_config(redis_manager: Optional[RedisConfigManager] = None) -> Dict[str, Any]:
-    """openai 카테고리 설정 가져오기"""
-    return get_category_config("openai", redis_manager)
+def get_openai_config(redis_manager: Optional[RedisConfigManager] = None) -> SimpleNamespace:
+    """
+    openai 카테고리 설정 가져오기 (SimpleNamespace)
+    
+    Returns:
+        SimpleNamespace: openai.* 설정들을 속성으로 접근 가능
+    
+    Example:
+        >>> openai = get_openai_config()
+        >>> print(openai.api_key)
+        >>> print(openai.model_default)
+    """
+    return get_category_config("openai", redis_manager, as_namespace=True)
 
 
-def get_anthropic_config(redis_manager: Optional[RedisConfigManager] = None) -> Dict[str, Any]:
-    """anthropic 카테고리 설정 가져오기"""
-    return get_category_config("anthropic", redis_manager)
+def get_anthropic_config(redis_manager: Optional[RedisConfigManager] = None) -> SimpleNamespace:
+    """
+    anthropic 카테고리 설정 가져오기 (SimpleNamespace)
+    
+    Returns:
+        SimpleNamespace: anthropic.* 설정들을 속성으로 접근 가능
+    
+    Example:
+        >>> anthropic = get_anthropic_config()
+        >>> print(anthropic.api_key)
+        >>> print(anthropic.model_default)
+    """
+    return get_category_config("anthropic", redis_manager, as_namespace=True)
 
 
-def get_vast_config(redis_manager: Optional[RedisConfigManager] = None) -> Dict[str, Any]:
-    """vast 카테고리 설정 가져오기"""
-    return get_category_config("vast", redis_manager)
+def get_vast_config(redis_manager: Optional[RedisConfigManager] = None) -> SimpleNamespace:
+    """
+    vast 카테고리 설정 가져오기 (SimpleNamespace, 자동 언래핑)
+    
+    Returns:
+        SimpleNamespace: vast.* 설정들을 속성으로 접근 가능
+        'vast' 래퍼 키가 있으면 자동으로 제거됨
+    
+    Example:
+        >>> vast = get_vast_config()
+        >>> print(vast.vllm.gpu_memory_utilization)  # 바로 접근!
+        >>> print(vast.vllm.port)
+        >>> print(vast.image.name)
+    """
+    return get_category_config("vast", redis_manager, as_namespace=True)
 
 
-def get_vllm_config(redis_manager: Optional[RedisConfigManager] = None) -> Dict[str, Any]:
-    """vllm 카테고리 설정 가져오기"""
-    return get_category_config("vllm", redis_manager)
+def get_vllm_config(redis_manager: Optional[RedisConfigManager] = None) -> SimpleNamespace:
+    """
+    vllm 카테고리 설정 가져오기 (SimpleNamespace)
+    
+    Returns:
+        SimpleNamespace: vllm.* 설정들을 속성으로 접근 가능
+    
+    Example:
+        >>> vllm = get_vllm_config()
+        >>> print(vllm.port)
+        >>> print(vllm.gpu_memory_utilization)
+    """
+    return get_category_config("vllm", redis_manager, as_namespace=True)
