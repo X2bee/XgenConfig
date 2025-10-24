@@ -7,6 +7,7 @@ Redis에서 설정을 dictionary 형태로 가져오는 다양한 방법들을 �
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from types import SimpleNamespace
 
 from service.config_utils import (
     get_config_dict,
@@ -21,6 +22,31 @@ from service.config_utils import (
     get_vast_config
 )
 import json
+
+
+def dict_to_namespace(data):
+    """
+    dict를 재귀적으로 SimpleNamespace로 변환
+    자동으로 'vast' 같은 래퍼 키를 언래핑합니다
+    """
+    if isinstance(data, dict):
+        # 🎯 자동 언래핑: 단일 키만 있고 그 값이 dict인 경우
+        if len(data) == 1:
+            key, value = next(iter(data.items()))
+            # 일반적인 래퍼 키를 자동으로 건너뜀
+            common_wrappers = {'vast', 'config', 'data', 'settings', 'options'}
+            if key in common_wrappers and isinstance(value, dict):
+                data = value  # 래퍼를 벗김
+        
+        # dict의 모든 값을 재귀적으로 변환
+        return SimpleNamespace(**{
+            key: dict_to_namespace(value) 
+            for key, value in data.items()
+        })
+    elif isinstance(data, list):
+        return [dict_to_namespace(item) for item in data]
+    else:
+        return data
 
 
 def print_section(title):
@@ -106,9 +132,11 @@ def main():
     print("\n📱 get_app_config():")
     print(json.dumps(app, indent=2, ensure_ascii=False))
 
-    vast = get_vast_config()
-    print("\n🚀 get_vast_config() - vllm 설정만:")
-    print(json.dumps(vast.get("vast", {}).get("vllm", {}), indent=2, ensure_ascii=False))
+    print("\n🛰️ get_vast_config():")
+    vast = dict_to_namespace(get_vast_config())
+    print(vast.vllm.gpu_memory_utilization)  # 바로 작동! 🎉
+
+    #print(json.dumps(vast.get("vast", {}).get("vllm", {}), indent=2, ensure_ascii=False))
 
     # 9. 실제 사용 예제
     print_section("9. 실제 사용 예제")
